@@ -53,7 +53,7 @@ mpinodes=1
 # Name of local requirements file: currently unused
 req_file=""
 
-while getopts "a:i:o:de:j:n:N:z:h:S:v:V:c:w:x:u:q:r:s:T:I:O:R:C:D:m:A:t:" arg 
+while getopts "a:i:o:de:j:n:N:z:h:S:v:V:c:w:x:u:q:r:s:T:I:O:R:C:D:m:" arg 
 do
     case "$arg" in
     a) xtra_args="$OPTARG" ;;
@@ -83,8 +83,6 @@ do
     C) req_file="$OPTARG" ;;
     D) run_dir="$OPTARG" ;;
     m) req_mem="$OPTARG" ;;
-    A) project="$OPTARG" ;;
-    t) runtime="$OPTARG" ;;
     -) break ;;
     ?) echo $usage_string
        exit 1 ;;
@@ -189,7 +187,7 @@ if [ ${#remap_files[@]} -gt 0 ] ; then
 	if [ ! -z "${remap_files[0]}" ] ; then
 	    map=${remap_files[$i]}
 	else
-	    map=${output_files$i]}
+	    map=${output_files[$i]}
 	fi
 	transfer_output_remaps="$transfer_output_remaps;${output_files[$i]}=$map"
     done
@@ -203,19 +201,18 @@ submit_file_environment="#"
 
 if [ "x$environment" != "x" ] ; then
 # Input format is suitable for bourne shell style assignment. Convert to
-# old condor format (no double quotes in submit file).
-# FIXME: probably it's better to convert everything into the 'new' Condor
-# environment format.
+# new condor format to avoid errors  when things like LS_COLORS (which 
+# has semicolons in it) get captured
     eval "env_array=($environment)"
-    submit_file_environment=""
-    for  env_var in "${env_array[@]}"; do
-        if [ "x$submit_file_environment" == "x" ] ; then
-            submit_file_environment="environment = "
-        else
-            submit_file_environment="$submit_file_environment;"
-        fi
-        submit_file_environment="${submit_file_environment}${env_var}"
-    done
+    dq='"'
+    sq="'"
+    # escape single-quote and double-quote characters (by doubling them)
+    env_array=("${env_array[@]//$sq/$sq$sq}")
+    env_array=("${env_array[@]//$dq/$dq$dq}")
+    # map key=val -> key='val'
+    env_array=("${env_array[@]/=/=$sq}")
+    env_array=("${env_array[@]/%/$sq}")
+    submit_file_environment="environment = \"${env_array[*]}\""
 else
     if [ "x$envir" != "x" ] ; then
 # Old Condor format (no double quotes in submit file)
@@ -225,15 +222,12 @@ fi
 
 ### This appears to only be necessary if Condor is passing arguments
 ### with the "new_esc_format"
-### If the first and last characters are '"', then assume that is the case.
 # # NOTE: The arguments we are given are specially escaped for a shell,
 # # so to get them back into Condor format we need to remove all the
 # # extra quotes. We do this by replacing '" "' with ' ' and stripping
 # # the leading and trailing "s.
-if echo $arguments | grep -q '^".*"$' ; then
-  arguments="$(echo $arguments | sed -e 's/\" \"/ /g')"
-  arguments=${arguments:1:$((${#arguments}-2))}
-fi
+# arguments="$(echo $arguments | sed -e 's/\" \"/ /g')"
+# arguments=${arguments:1:$((${#arguments}-2))}
 
 cat > $submit_file << EOF
 universe = vanilla
@@ -253,11 +247,6 @@ fi
 if [ "x$req_mem" != "x" ]
 then
   echo "request_memory = $req_mem" >> $submit_file
-fi
-
-if [ "x$runtime" != "x" ]
-then
-  echo "periodic_remove = JobStatus == 2 && time() - JobCurrentStartExecutingDate > $runtime" >> $submit_file
 fi
 
 cat >> $submit_file << EOF
@@ -287,7 +276,7 @@ else
 fi
 
 #local batch system-specific file output must be added to the submit file
-local_submit_attributes_file=${blah_bin_directory}/condor_local_submit_attributes.sh
+local_submit_attributes_file=${blah_libexec_directory}/condor_local_submit_attributes.sh
 if [ -r $local_submit_attributes_file ] ; then
     echo \#\!/bin/sh > $tmp_req_file
     if [ ! -z $req_file ] ; then
@@ -340,7 +329,7 @@ if [ "$return_code" == "0" ] ; then
     blahp_jobID="condor/$jobID/$queue/$pool"
 
     if [ "x$job_registry" != "x" ]; then
-      `dirname $0`/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$creamjobid" "$proxy_file" 0 "$proxy_subject"
+      ${blah_sbin_directory}/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$creamjobid" "$proxy_file" 0 "$proxy_subject"
     fi
 
     echo "BLAHP_JOBID_PREFIX$blahp_jobID"
@@ -358,11 +347,7 @@ rm -f $submit_file
 if [ "x$job_registry" == "x" ]; then
     if [ -r "$proxy_file" -a -f "$proxy_file" ] ; then
         [ -d "$proxy_dir" ] || mkdir $proxy_dir
-        if [ "${proxy_file:0:1}" == "/" ] ; then
-            ln -s $proxy_file $proxy_dir/$jobID.proxy.norenew
-        else
-            ln -s `pwd`/$proxy_file $proxy_dir/$jobID.proxy.norenew
-        fi
+        ln -s $proxy_file $proxy_dir/$jobID.proxy.norenew
     fi
 fi
 

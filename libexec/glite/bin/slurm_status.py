@@ -40,8 +40,12 @@ import struct
 import subprocess
 import signal
 import tempfile
+import traceback
 import pickle
 import csv
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import blah
 
 cache_timeout = 60
 
@@ -229,27 +233,28 @@ def call_scontrol(jobid=""):
 
     starttime = time.time()
     log("Starting scontrol.")
-    child_stdout = os.popen("%s show job %s" % (scontrol, jobid))
-    result = parse_scontrol_fd(child_stdout)
-    exit_status = child_stdout.close()
+    command = (scontrol, 'show', 'job')
+    if jobid:
+        command += (jobid,)
+    scontrol_proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    scontrol_out, _ = scontrol_proc.communicate()
+
+    result = parse_scontrol(scontrol_out)
     log("Finished scontrol (time=%f)." % (time.time()-starttime))
-    if exit_status:
-        exit_code = 0
-        if os.WIFEXITED(exit_status):
-            exit_code = os.WEXITSTATUS(exit_status)
-        if exit_code == 1: # Completed
-            result = {jobid: {'BatchJobId': '"%s"' % jobid, "JobStatus": "4", "ExitCode": ' 0'}}
-        elif exit_code == 271: # Removed
-            result = {jobid: {'BatchJobId': '"%s"' % jobid, 'JobStatus': '3', 'ExitCode': ' 0'}}
-        else:
-            raise Exception("scontrol failed with exit code %s" % str(exit_status))
-    
+
+    if scontrol_proc.returncode == 1: # Completed
+        result = {jobid: {'BatchJobId': '"%s"' % jobid, "JobStatus": "4", "ExitCode": ' 0'}}
+    elif scontrol_proc.returncode == 271: # Removed
+        result = {jobid: {'BatchJobId': '"%s"' % jobid, 'JobStatus': '3', 'ExitCode': ' 0'}}
+    elif scontrol_proc.returncode != 0:
+        raise Exception("scontrol failed with exit code %s" % str(scontrol_proc.returncode))
+
     # If the job has completed...
     if jobid is not "" and "JobStatus" in result[jobid] and (result[jobid]["JobStatus"] == '4' or result[jobid]["JobStatus"] == '3'):
         # Get the finished job stats and update the result
         finished_job_stats = get_finished_job_stats(jobid)
         result[jobid].update(finished_job_stats)
-    
+
     return result
 
 
@@ -280,7 +285,6 @@ def convert_cpu_to_seconds(cpu_string):
     # The time fields in sacct's output have this format:
     #   [DD-[hh:]]mm:ss
     # Convert that to just seconds.
-    import re
     elem = re.split('[-:]', cpu_string)
     secs = int(elem[-1]) + int(elem[-2]) * 60
     if len(elem) > 2:
@@ -320,25 +324,36 @@ def get_finished_job_stats(jobid):
     # so sum up relevant values
     for row in reader:
         if row["AveCPU"] is not "":
-            return_dict['RemoteUserCpu'] += convert_cpu_to_seconds(row["AveCPU"]) * int(row["AllocCPUS"])
+            try:
+                return_dict['RemoteUserCpu'] += convert_cpu_to_seconds(row["AveCPU"]) * int(row["AllocCPUS"])
+            except:
+                log("Failed to parse CPU usage for job id %s: %s, %s" % (jobid, row["AveCPU"], row["AllocCPUS"]))
+                raise                
         if row["MaxRSS"] is not "":
             # Remove the trailing [KMGTP] and scale the value appropriately
             # Note: We assume that all values will have a suffix, and we
             #   want the value in kilos.
-            value = row["MaxRSS"]
-            factor = 1
-            if value[-1] == 'M':
-                factor = 1024
-            elif value[-1] == 'G':
-                factor = 1024 * 1024
-            elif value[-1] == 'T':
-                factor = 1024 * 1024 * 1024
-            elif value[-1] == 'P':
-                factor = 1024 * 1024 * 1024 * 1024
-            return_dict["ImageSize"] += int(value.strip('KMGTP')) * factor
+            try:
+                value = row["MaxRSS"]
+                factor = 1
+                if value[-1] == 'M':
+                    factor = 1024
+                elif value[-1] == 'G':
+                    factor = 1024 * 1024
+                elif value[-1] == 'T':
+                    factor = 1024 * 1024 * 1024
+                elif value[-1] == 'P':
+                    factor = 1024 * 1024 * 1024 * 1024
+                    return_dict["ImageSize"] += int(value.strip('KMGTP')) * factor
+            except:
+                log("Failed to parse memory usage for job id %s: %s" % (jobid, row["MaxRSS"]))
+                raise
         if row["ExitCode"] is not "":
-            return_dict["ExitCode"] = int(row["ExitCode"].split(":")[0])
-
+            try:
+                return_dict["ExitCode"] = int(row["ExitCode"].split(":")[0])
+            except:
+                log("Failed to parse memory usage for job id %s: %s" % (jobid, row["MaxRSS"]))
+                raise
     return return_dict
     
 
@@ -350,34 +365,32 @@ def get_slurm_location(program):
     global _slurm_location_cache
     if _slurm_location_cache != None:
         return os.path.join(_slurm_location_cache, program)
-    load_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blah_load_config.sh')
-    if os.path.exists(load_config_path) and os.access(load_config_path, os.R_OK):
-        cmd = "/bin/bash -c 'source %s && echo ${slurm_binpath:-/usr/bin}/%s'" % (load_config_path, program)
-    else:
-        cmd = 'which %s' % program
+
+    cmd = 'echo "%s/%s"' % (config.get('slurm_binpath'), 'scontrol')
+
     child_stdout = os.popen(cmd)
-    output = child_stdout.read()
-    location = output.split("\n")[0].strip()
+    output = child_stdout.read().split("\n")[0].strip()
     if child_stdout.close():
         raise Exception("Unable to determine scontrol location: %s" % output)
-    _slurm_location_cache = os.path.dirname(location)
-    return location
+
+    _slurm_location_cache = os.path.dirname(output)
+    return output
 
 job_id_re = re.compile("JobId=([0-9]+) .*")
 exec_host_re = re.compile("\s*BatchHost=([\w\-.]+)")
 status_re = re.compile("\s*JobState=([\w]+) .*")
 exit_status_re = re.compile(".* ExitCode=(-?[0-9]+:[0-9]+)")
-status_mapping = {"BOOT_FAIL": 4, "CANCELLED": 3, "COMPLETED": 4, "CONFIGURING": 1, "COMPLETING": 2, "FAILED": 4, "NODE_FAIL": 4, "PENDING": 1, "PREEMPTED": 4, "RUNNING": 2, "SPECIAL_EXIT": 4, "STOPPED": 2, "SUSPENDED": 2, "TIMEOUT": 4}
+status_mapping = {"BOOT_FAIL": 4, "CANCELLED": 3, "COMPLETED": 4, "CONFIGURING": 1, "COMPLETING": 2, "FAILED": 4, "NODE_FAIL": 4, "PENDING": 1, "PREEMPTED": 4, "RUNNING": 2, "SPECIAL_EXIT": 4, "STOPPED": 2, "SUSPENDED": 2}
 
-def parse_scontrol_fd(fd):
+def parse_scontrol(output):
     """
-    Parse the stdout fd of "scontrol show job" into a python dictionary
+    Parse the stdout of "scontrol show job" into a python dictionary
     containing the information we need.
     """
     job_info = {}
     cur_job_id = None
     cur_job_info = {}
-    for line in fd:
+    for line in output.split('\n'):
         line = line.strip()
         m = job_id_re.match(line)
         if m:
@@ -504,6 +517,10 @@ def main():
         print "1Usage: slurm_status.py slurm/<date>/<jobid>"
         return 1
     jobid = jobid_arg.split("/")[-1].split(".")[0]
+
+    global config
+    config = blah.BlahConfigParser(defaults={'slurm_binpath': '/usr/bin'})
+
     log("Checking cache for jobid %s" % jobid)
     cache_contents = None
     try:
@@ -539,5 +556,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception, e:
+        log(traceback.format_exc())
         print "1ERROR: %s" % str(e).replace("\n", "\\n")
         sys.exit(0)

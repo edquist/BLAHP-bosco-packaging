@@ -51,16 +51,11 @@ cat > $bls_tmp_file << end_of_preamble
 #SBATCH -e $slurm_std_storage
 end_of_preamble
 
-if [ "x$bls_opt_project" != "x" ] ; then
-  echo "#SBATCH -A $bls_opt_project" >> $bls_tmp_file
-fi
-
-if [ "x$bls_opt_runtime" != "x" ] ; then
-  echo "#SBATCH -t $((bls_opt_runtime / 60))" >> $bls_tmp_file
-fi
-
 #local batch system-specific file output must be added to the submit file
-bls_local_submit_attributes_file=${blah_bin_directory}/slurm_local_submit_attributes.sh
+bls_local_submit_attributes_file=${blah_libexec_directory}/slurm_local_submit_attributes.sh
+
+# Handle queues and paritions (same thing in SLURM) (copied from PBS submit file)
+[ -z "$bls_opt_queue" ] || grep -q "^#SBATCH --partition" $bls_tmp_file || echo "#SBATCH --partition=$bls_opt_queue" >> $bls_tmp_file
 
 if [ "x$bls_opt_req_mem" != "x" ]
 then
@@ -68,24 +63,22 @@ then
   echo "#SBATCH --mem=${bls_opt_req_mem}" >> $bls_tmp_file
 fi
 
-bls_set_up_local_and_extra_args
-
-# Write SLURM directives according to command line options
-# Map the queue option to slurm's partition option
-# handle queue/partition overriding
-[ -z "$bls_opt_queue" ] || grep -q "^#SBATCH -p" $bls_tmp_file || echo "#SBATCH -p $bls_opt_queue" >> $bls_tmp_file
-
 # Simple support for multi-cpu attributes
 if [[ $bls_opt_mpinodes -gt 1 ]] ; then
-  echo "#SBATCH -N $bls_opt_mpinodes" >> $bls_tmp_file
+  echo "#SBATCH --nodes=1" >> $bls_tmp_file
+  echo "#SBATCH --ntasks=1" >> $bls_tmp_file
+  echo "#SBATCH --cpus-per-task=$bls_opt_mpinodes" >> $bls_tmp_file
 fi
 
+# Do the local and extra args after all #SBATCH commands, otherwise slurm ignores anything
+# after a non-#SBATCH command
+bls_set_up_local_and_extra_args
 
 # Input and output sandbox setup.
 # Assume all filesystems are shared.
 
 bls_add_job_wrapper
-
+bls_save_submit
 
 ###############################################################
 # Submit the script
@@ -94,6 +87,7 @@ bls_add_job_wrapper
 datenow=`date +%Y%m%d`
 jobID=`${slurm_binpath}/sbatch $bls_tmp_file` # actual submission
 retcode=$?
+
 if [ "$retcode" != "0" ] ; then
 	rm -f $bls_tmp_file
 	echo "Error from sbatch: $jobID" >&2

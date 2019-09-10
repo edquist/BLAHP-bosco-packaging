@@ -46,8 +46,14 @@
 
 logpath=${pbs_spoolpath}/server_logs
 if [ ! -d $logpath -o ! -x $logpath ]; then
- pbs_spoolpath=`${pbs_binpath}/tracejob | grep 'default prefix path'|awk -F" " '{ print $5 }'`
- logpath=${pbs_spoolpath}/server_logs
+  if [ -x "${pbs_binpath}/tracejob" ]; then
+    pbs_spoolpath=`${pbs_binpath}/tracejob | grep 'default prefix path'|awk -F" " '{ print $5 }'`
+    logpath=${pbs_spoolpath}/server_logs
+  else
+    # EPEL defaults for torque
+    pbs_spoolpath=/var/lib/torque/spool
+    logpath=/var/lib/torque/server_logs
+  fi
 fi
 
 bls_job_id_for_renewal=PBS_JOBID
@@ -108,23 +114,30 @@ then
   echo "#PBS -e $pbs_std_storage" >> $bls_tmp_file
 fi
 
-if [ "x$bls_opt_project" != "x" ] ; then
-  echo "#PBS -A $bls_opt_project" >> $bls_tmp_file
-fi
-
-if [ "x$bls_opt_runtime" != "x" ] ; then
-  echo "#PBS -l walltime=$bls_opt_runtime" >> $bls_tmp_file
-fi
-
 #local batch system-specific file output must be added to the submit file
-bls_local_submit_attributes_file=${blah_bin_directory}/pbs_local_submit_attributes.sh
+bls_local_submit_attributes_file=${blah_libexec_directory}/pbs_local_submit_attributes.sh
 
-if [ "x$bls_opt_req_mem" != "x" ]
-then
-  # Different schedulers require different memory checks
-  echo "#PBS -l mem=${bls_opt_req_mem}mb" >> $bls_tmp_file
-  echo "#PBS -l pmem=${bls_opt_req_mem}mb" >> $bls_tmp_file
-  echo "#PBS -l pvmem=${bls_opt_req_mem}mb" >> $bls_tmp_file
+# Begin building the select statement: select=x where x is the number of 'chunks'
+# to request. Chunk requests should precede any resource requests (resource
+# requests are order independent). An example from the PBS Pro manual:
+# #PBS -l  select=2:ncpus=8:mpiprocs=8:mem=6gb:interconnect=10g,walltime=16:00:00
+# Only one chunk is required for OSG needs at this time.
+pbs_select="#PBS -l select=1"
+
+if [ "x$bls_opt_req_mem" != "x" ]; then
+    # Max amount of virtual memory allocated to a single process
+    if [[ "x$pbs_set_pvmem" == "xyes" ]]; then
+        echo "#PBS -l pvmem=${bls_opt_req_mem}mb" >> $bls_tmp_file
+    fi
+    # Max amount of physical memory allocated to a single process
+    if [[ "$bls_opt_smpgranularity" == 1 ]]; then
+        echo "#PBS -l pmem=${bls_opt_req_mem}mb" >> $bls_tmp_file
+    fi
+    # Total amount of memory allocated to the job
+    pbs_select="$pbs_select:mem=${bls_opt_req_mem}mb"
+    if [ "x$pbs_pro" != "xyes" ]; then
+        echo "#PBS -l mem=${bls_opt_req_mem}mb" >> $bls_tmp_file
+    fi
 fi
 
 bls_set_up_local_and_extra_args
@@ -134,47 +147,49 @@ bls_set_up_local_and_extra_args
 [ -z "$bls_opt_queue" ] || grep -q "^#PBS -q" $bls_tmp_file || echo "#PBS -q $bls_opt_queue" >> $bls_tmp_file
 
 # Extended support for MPI attributes
-if [ "x$bls_opt_wholenodes" == "xyes" ] ; then
-  bls_opt_hostsmpsize=${bls_opt_hostsmpsize:-1}
-  if [[ ! -z "$bls_opt_smpgranularity" ]] ; then
-    if [[ -z "$bls_opt_hostnumber" ]] ; then
-      echo "#PBS -l nodes=1:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
-    else
-      echo "#PBS -l nodes=$bls_opt_hostnumber:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
-    fi
-    echo "#PBS -W x=NACCESSPOLICY:SINGLEJOB" >> $bls_tmp_file
-  else
-    if [[ ! -z "$bls_opt_hostnumber" ]] ; then
-      if [[ $bls_opt_mpinodes -gt 0 ]] ; then
-        r=$((bls_opt_mpinodes % bls_opt_hostnumber))
-        (( r )) && mpireminder="+$r:ppn=$bls_opt_hostsmpsize"
-        echo "#PBS -l nodes=$((bls_opt_hostnumber-r)):ppn=${bls_opt_hostsmpsize}${mpireminder}" >> $bls_tmp_file
-      else
-        echo "#PBS -l nodes=$bls_opt_hostnumber:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
-      fi
-      echo "#PBS -W x=NACCESSPOLICY:SINGLEJOB" >> $bls_tmp_file
-    fi
-  fi
+if [ "x$pbs_pro" == "xyes" ]; then
+    pbs_select="$pbs_select:ncpus=$bls_opt_smpgranularity"
 else
-  if [[ ! -z "$bls_opt_smpgranularity" ]] ; then
-    n=$((bls_opt_mpinodes / bls_opt_smpgranularity))
-    r=$((bls_opt_mpinodes % bls_opt_smpgranularity))
-    (( r )) && mpireminder="+1:ppn=$r"
-    echo "#PBS -l nodes=$n:ppn=${bls_opt_smpgranularity}${mpireminder}" >> $bls_tmp_file
-  else
-    if [[ ! -z "$bls_opt_hostnumber" ]] ; then
-      n=$((bls_opt_mpinodes / bls_opt_hostnumber))
-      r=$((bls_opt_mpinodes % bls_opt_hostnumber))
-      (( r )) && mpireminder="+$r:ppn=$((n+1))"
-      echo "#PBS -l nodes=$((bls_opt_hostnumber-r)):ppn=$n$mpireminder" >> $bls_tmp_file
-    elif [[ $bls_opt_mpinodes -gt 0 ]] ; then
-      echo "#PBS -l nodes=$bls_opt_mpinodes" >> $bls_tmp_file
+    if [ "x$bls_opt_wholenodes" == "xyes" ]; then
+        bls_opt_hostsmpsize=${bls_opt_hostsmpsize:-1}
+        if [[ ! -z "$bls_opt_smpgranularity" ]] ; then
+            if [[ -z "$bls_opt_hostnumber" ]] ; then
+                echo "#PBS -l nodes=1:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
+            else
+                echo "#PBS -l nodes=$bls_opt_hostnumber:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
+            fi
+            echo "#PBS -W x=NACCESSPOLICY:SINGLEJOB" >> $bls_tmp_file
+        else
+            if [[ ! -z "$bls_opt_hostnumber" ]] ; then
+                if [[ $bls_opt_mpinodes -gt 0 ]] ; then
+                    r=$((bls_opt_mpinodes % bls_opt_hostnumber))
+                    (( r )) && mpireminder="+$r:ppn=$bls_opt_hostsmpsize"
+                    echo "#PBS -l nodes=$((bls_opt_hostnumber-r)):ppn=${bls_opt_hostsmpsize}${mpireminder}" >> $bls_tmp_file
+                else
+                    echo "#PBS -l nodes=$bls_opt_hostnumber:ppn=$bls_opt_hostsmpsize" >> $bls_tmp_file
+                fi
+                echo "#PBS -W x=NACCESSPOLICY:SINGLEJOB" >> $bls_tmp_file
+            fi
+        fi
+    else
+        if [[ ! -z "$bls_opt_smpgranularity" ]] ; then
+            n=$((bls_opt_mpinodes / bls_opt_smpgranularity))
+            r=$((bls_opt_mpinodes % bls_opt_smpgranularity))
+            (( r )) && mpireminder="+1:ppn=$r"
+            echo "#PBS -l nodes=$n:ppn=${bls_opt_smpgranularity}${mpireminder}" >> $bls_tmp_file
+        else
+            if [[ ! -z "$bls_opt_hostnumber" ]] ; then
+                n=$((bls_opt_mpinodes / bls_opt_hostnumber))
+                r=$((bls_opt_mpinodes % bls_opt_hostnumber))
+                (( r )) && mpireminder="+$r:ppn=$((n+1))"
+                echo "#PBS -l nodes=$((bls_opt_hostnumber-r)):ppn=$n$mpireminder" >> $bls_tmp_file
+            elif [[ $bls_opt_mpinodes -gt 0 ]] ; then
+                echo "#PBS -l nodes=$bls_opt_mpinodes" >> $bls_tmp_file
+            fi
+        fi
     fi
-  fi
 fi
 # --- End of MPI directives
-
-
 
 # Input and output sandbox setup.
 if [ "x$blah_torque_multiple_staging_directive_bug" == "xyes" ]; then
@@ -183,8 +198,8 @@ if [ "x$blah_torque_multiple_staging_directive_bug" == "xyes" ]; then
   bls_fl_subst_and_accumulate outputsand "stageout=@@F_REMOTE@`hostname -f`:@@F_LOCAL" ","
   [ -z "$bls_fl_subst_and_accumulate_result" ] || echo "#PBS -W $bls_fl_subst_and_accumulate_result" >> $bls_tmp_file
 elif [ "x$blah_torque_multiple_staging_directive_bug" == "xmultiline" ]; then
-  bls_fl_subst_and_dump inputsand "#PBS -W stagein=@@F_REMOTE@`hostname -f`:@@F_LOCAL" $bls_tmp_file
-  bls_fl_subst_and_dump outputsand "#PBS -W stageout=@@F_REMOTE@`hostname -f`:@@F_LOCAL" $bls_tmp_file
+  bls_fl_subst_and_dump inputsand "#PBS -W stagein=@@F_REMOTE@`hostname -f`:@@F_LOCAL" >> $bls_tmp_file
+  bls_fl_subst_and_dump outputsand "#PBS -W stageout=@@F_REMOTE@`hostname -f`:@@F_LOCAL" >> $bls_tmp_file
 else
   bls_fl_subst_and_accumulate inputsand "@@F_REMOTE@`hostname -f`:@@F_LOCAL" ","
   [ -z "$bls_fl_subst_and_accumulate_result" ] || echo "#PBS -W stagein=\\'$bls_fl_subst_and_accumulate_result\\'" >> $bls_tmp_file
@@ -192,9 +207,14 @@ else
   [ -z "$bls_fl_subst_and_accumulate_result" ] || echo "#PBS -W stageout=\\'$bls_fl_subst_and_accumulate_result\\'" >> $bls_tmp_file
 fi
 
+if [ "x$pbs_pro" == "xyes" ]; then
+    echo $pbs_select >> $bls_tmp_file
+fi
+
 echo "#PBS -m n"  >> $bls_tmp_file
 
 bls_add_job_wrapper
+bls_save_submit
 
 # Let the wrap script be at least 1 second older than logfile
 # for subsequent "find -newer" command to work
@@ -210,6 +230,8 @@ jobID=`${pbs_binpath}/qsub $bls_tmp_file` # actual submission
 retcode=$?
 if [ "$retcode" != "0" ] ; then
 	rm -f $bls_tmp_file
+	# Echo the output from qsub onto stderr, which is captured by HTCondor
+	echo "Error from qsub: $jobID" >&2
 	exit 1
 fi
 
@@ -217,7 +239,7 @@ fi
 jobID=`echo $jobID | awk 'match($0,/[0-9]+/){print substr($0, RSTART, RLENGTH)}'`
 if [ "X$jobID" == "X" ]; then
 	rm -f $bls_tmp_file
-	echo "Error: job id missing" >&2
+	echo "Error from qsub: $jobID" >&2
 	echo Error # for the sake of waiting fgets in blahpd
 	exit 1
 fi
@@ -300,7 +322,7 @@ blahp_jobID="pbs/`basename $logfile`/$jobID"
 if [ "x$job_registry" != "x" ]; then
   now=`date +%s`
   let now=$now-1
-  `dirname $0`/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
+  ${blah_sbin_directory}/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
 fi
 
 echo "BLAHP_JOBID_PREFIX$blahp_jobID"

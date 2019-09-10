@@ -63,16 +63,8 @@ cat > $bls_tmp_file << end_of_preamble
 #\$ -S /bin/bash
 end_of_preamble
 
-if [ "x$bls_opt_project" != "x" ] ; then
-  echo "#\$ -A $bls_opt_project" >> $bls_tmp_file
-fi
-
-if [ "x$bls_opt_runtime" != "x" ] ; then
-  echo "#\$ -l h_rt=$bls_opt_runtime" >> $bls_tmp_file
-fi
-
 #local batch system-specific file output must be added to the submit file
-local_submit_attributes_file=${GLITE_LOCATION:-/opt/glite}/bin/sge_local_submit_attributes.sh
+local_submit_attributes_file=${blah_libexec_directory}/sge_local_submit_attributes.sh
 if [ -r $local_submit_attributes_file ] ; then
     echo \#\!/bin/sh > $bls_opt_tmp_req_file
     if [ ! -z $bls_opt_req_file ] ; then
@@ -91,7 +83,8 @@ fi
 # Write SGE directives according to command line options
 # handle queue overriding
 [ -z "$bls_opt_queue" ] || grep -q "^#\$ -q" $bls_tmp_file || echo "#\$ -q $bls_opt_queue" >> $bls_tmp_file
-[ -z "$bls_opt_mpinodes" -o "x${bls_opt_mpinodes}" = "x1" ] || grep -q"^#\$ -pe *\\*" $bls_tmp_file || echo "#\$ -pe * $bls_opt_mpinodes" >>$bls_tmp_file
+[ -z "$bls_opt_mpinodes" -o "x${bls_opt_mpinodes}" = "x1" ] || grep -q "^#\$ -pe *\\*" $bls_tmp_file \
+    || echo "#\$ -pe $sge_pe_policy $bls_opt_mpinodes" >>$bls_tmp_file
 
 # Input and output sandbox setup.
 bls_fl_subst_and_accumulate inputsand "@@F_REMOTE@`hostname -f`:@@F_LOCAL" "@@@"
@@ -101,6 +94,7 @@ bls_fl_subst_and_accumulate outputsand "@@F_REMOTE@`hostname -f`:@@F_LOCAL" "@@@
 echo "#$ -m n"  >> $bls_tmp_file
 
 bls_add_job_wrapper
+bls_save_submit
 
 ###############################################################
 # Submit the script
@@ -122,7 +116,7 @@ blahp_jobID=sge/`date +%Y%m%d%H%M%S`/$jobID
 if [ "x$job_registry" != "x" ]; then
   now=`date +%s`
   let now=$now-1
-  `dirname $0`/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
+  ${blah_sbin_directory}/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
 fi
 
 echo "BLAHP_JOBID_PREFIX$blahp_jobID"

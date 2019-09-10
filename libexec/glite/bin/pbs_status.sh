@@ -33,12 +33,12 @@
 
 . `dirname $0`/blah_load_config.sh
 
-if [ -x ${blah_bin_directory}/pbs_status.py ] ; then
-    exec ${blah_bin_directory}/pbs_status.py "$@"
+if [ -x ${blah_libexec_directory}/pbs_status.py ] ; then
+    exec ${blah_libexec_directory}/pbs_status.py "$@"
 fi
 
 if [ "x$job_registry" != "x" ] ; then
-   ${blah_bin_directory}/blah_job_registry_lkup $@
+   ${blah_sbin_directory}/blah_job_registry_lkup $@
    exit 0
 fi
 
@@ -60,7 +60,7 @@ usedBLParser="no"
 
 srvfound=""
 
-BLClient="${blah_bin_directory}/BLClient"
+BLClient="${blah_libexec_directory}/BLClient"
 
 qstatuser=`whoami`
 qstatcache=/tmp/qstatcache_${qstatuser}.txt
@@ -86,6 +86,9 @@ BEGIN {
 
 /Job Id:/ {
     current_job = substr($0, index($0, ":") + 2)
+    end = index(current_job, ".")
+    if ( end == 0 ) { end = length(current_job) + 1 }
+    current_job = substr(current_job, 1, end)
 }
 /exec_host =/ {
     current_wn = substr($0, index($0, "=")+2)
@@ -235,13 +238,13 @@ END {
         errout=`cat $staterr`
 	rm -f $staterr 2>/dev/null
 	
-        if [ "$qstat_exit_code" -eq "153" ] ; then
-                # If the job has disappeared, assume it's completed
+        if [ -z "$errout" ] ; then
+                echo "0"$result
+                retcode=0
+        elif [ "$qstat_exit_code" -eq "153" ] ; then
+                # If the job has disappeared, assume it's completed 
                 # (same as globus)
                 echo "0[BatchJobId=\"$reqjob\";JobStatus=4;ExitCode=0]"
-                retcode=0
-        elif [ -z "$errout" ] ; then
-                echo "0"$result
                 retcode=0
         else
                 echo "1ERROR: Job not found"

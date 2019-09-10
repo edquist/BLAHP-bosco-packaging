@@ -40,8 +40,12 @@ import struct
 import subprocess
 import signal
 import tempfile
+import traceback
 import pickle
 import csv
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import blah
 
 cache_timeout = 60
 
@@ -225,31 +229,28 @@ def qstat(jobid=""):
 
     Returns a python dictionary with the job info.
     """
-    qstat = get_qstat_location()
-    command = (qstat, '--version')
-    qstat_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    qstat_version, _ = qstat_process.communicate()
+    qstat_bin = get_qstat_location()
 
     starttime = time.time()
     log("Starting qstat.")
-    if re.search(r'PBSPro', qstat_version):
-        child_stdout = os.popen("%s -f %s" % (qstat, jobid)) # -1 conflicts with -f in PBS Pro
-    else:
-        child_stdout = os.popen("%s -f -1 %s" % (qstat, jobid))
-    result = parse_qstat_fd(child_stdout)
-    exit_status = child_stdout.close()
+    command = (qstat_bin, '-f')
+    pbs_pro = config.get('pbs_pro').lower() == 'yes'
+    if not pbs_pro:
+        command += ('-1',)  # -1 conflicts with -f in PBS Pro
+    if jobid:
+        command += ('-x', jobid) if pbs_pro else (jobid,)
+    qstat_proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    qstat_out, _ = qstat_proc.communicate()
+    result = parse_qstat(qstat_out)
     log("Finished qstat (time=%f)." % (time.time()-starttime))
-    if exit_status:
-        exit_code = 0
-        if os.WIFEXITED(exit_status):
-            exit_code = os.WEXITSTATUS(exit_status)
-        if exit_code == 153 or exit_code == 35: # Completed
-            result = {jobid: {'BatchJobId': '"%s"' % jobid, "JobStatus": "4", "ExitCode": ' 0'}}
-        elif exit_code == 271: # Removed
-            result = {jobid: {'BatchJobId': '"%s"' % jobid, 'JobStatus': '3', 'ExitCode': ' 0'}}
-        else:
-            raise Exception("qstat failed with exit code %s" % str(exit_status))
-    
+
+    if qstat_proc.returncode in [35, 153]: # Completed or no longer in queue (presumably completed successfully)
+        result = {jobid: {'BatchJobId': '"%s"' % jobid, "JobStatus": "4", "ExitCode": ' 0'}}
+    elif qstat_proc.returncode == 271: # Removed
+        result = {jobid: {'BatchJobId': '"%s"' % jobid, 'JobStatus': '3', 'ExitCode': ' 0'}}
+    elif qstat_proc.returncode != 0:
+        raise Exception("qstat failed with exit code %s" % str(qstat_proc.returncode))
+
     # If the job has completed...
     if jobid is not "" and "JobStatus" in result[jobid] and (result[jobid]["JobStatus"] == '4' or result[jobid]["JobStatus"] == '3'):
         # Get the finished job stats and update the result
@@ -283,9 +284,8 @@ def which(program):
     return None
 
 def convert_cpu_to_seconds(cpu_string):
-    import re
-    h,m,s = re.split(':',cpu_string)
-    return int(h) * 3600 + int(m) * 60 + int(s)
+    hrs, mins, secs = re.split(':', cpu_string)
+    return int(hrs) * 3600 + int(mins) * 60 + int(secs)
 
 _cluster_type_cache = None
 def get_finished_job_stats(jobid):
@@ -336,25 +336,37 @@ def get_finished_job_stats(jobid):
         # so sum up relevant values
         for row in reader:
             if row["AveCPU"] is not "":
-                return_dict['RemoteUserCpu'] += convert_cpu_to_seconds(row["AveCPU"]) * int(row["AllocCPUS"])
+                try:
+                    return_dict['RemoteUserCpu'] += convert_cpu_to_seconds(row["AveCPU"]) * int(row["AllocCPUS"])
+                except:
+                    log("Failed to parse CPU usage for job id %s: %s, %s" % (jobid, row["AveCPU"], row["AllocCPUS"]))
+                    raise
             if row["MaxRSS"] is not "":
                 # Remove the trailing [KMGTP] and scale the value appropriately
                 # Note: We assume that all values will have a suffix, and we
                 #   want the value in kilos.
-                value = row["MaxRSS"]
-                factor = 1
-                if value[-1] == 'M':
-                    factor = 1024
-                elif value[-1] == 'G':
-                    factor = 1024 * 1024
-                elif value[-1] == 'T':
-                    factor = 1024 * 1024 * 1024
-                elif value[-1] == 'P':
-                    factor = 1024 * 1024 * 1024 * 1024
-                return_dict["ImageSize"] += int(value.strip('KMGTP')) * factor
+                try:
+                    value = row["MaxRSS"]
+                    factor = 1
+                    if value[-1] == 'M':
+                        factor = 1024
+                    elif value[-1] == 'G':
+                        factor = 1024 * 1024
+                    elif value[-1] == 'T':
+                        factor = 1024 * 1024 * 1024
+                    elif value[-1] == 'P':
+                        factor = 1024 * 1024 * 1024 * 1024
+                        return_dict["ImageSize"] += int(value.strip('KMGTP')) * factor
+                except:
+                    log("Failed to parse memory usage for job id %s: %s" % (jobid, row["MaxRSS"]))
+                    raise
             if row["ExitCode"] is not "":
-                return_dict["ExitCode"] = int(row["ExitCode"].split(":")[0])
-    
+                try:
+                    return_dict["ExitCode"] = int(row["ExitCode"].split(":")[0])
+                except:
+                    log("Failed to parse ExitCode for job id %s: %s" % (jobid, row["ExitCode"]))
+                    raise
+                    
     # PBS completion        
     elif _cluster_type_cache == "pbs":
         pass
@@ -370,18 +382,16 @@ def get_qstat_location():
     global _qstat_location_cache
     if _qstat_location_cache != None:
         return _qstat_location_cache
-    load_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blah_load_config.sh')
-    if os.path.exists(load_config_path) and os.access(load_config_path, os.R_OK):
-        cmd = "/bin/bash -c 'source %s && echo $pbs_binpath/qstat'" % load_config_path
-    else:
-        cmd = 'which qstat'
+
+    cmd = 'echo "%s/%s"' % (config.get('pbs_binpath'), 'qstat')
+
     child_stdout = os.popen(cmd)
-    output = child_stdout.read()
-    location = output.split("\n")[0].strip()
+    output = child_stdout.read().split("\n")[0].strip()
     if child_stdout.close():
         raise Exception("Unable to determine qstat location: %s" % output)
-    _qstat_location_cache = location
-    return location
+
+    _qstat_location_cache = output
+    return output
 
 job_id_re = re.compile("\s*Job Id:\s([0-9]+)([\w\-\/.]*)")
 exec_host_re = re.compile("\s*exec_host = ([\w\-\/.]+)")
@@ -389,15 +399,15 @@ status_re = re.compile("\s*job_state = ([QREFCH])")
 exit_status_re = re.compile("\s*[Ee]xit_status = (-?[0-9]+)")
 status_mapping = {"Q": 1, "R": 2, "E": 2, "F": 4, "C": 4, "H": 5}
 
-def parse_qstat_fd(fd):
+def parse_qstat(output):
     """
-    Parse the stdout fd of "qstat -f" into a python dictionary containing
+    Parse the stdout of "qstat -f" into a python dictionary containing
     the information we need.
     """
     job_info = {}
     cur_job_id = None
     cur_job_info = {}
-    for line in fd:
+    for line in output.split('\n'):
         line = line.strip()
         m = job_id_re.match(line)
         if m:
@@ -539,6 +549,11 @@ def main():
         print "1Usage: pbs_status.sh pbs/<date>/<jobid>"
         return 1
     jobid = jobid_arg.split("/")[-1].split(".")[0]
+
+    global config
+    config = blah.BlahConfigParser(defaults={'pbs_pro': 'no',
+                                             'pbs_binpath': '/usr/bin'})
+
     log("Checking cache for jobid %s" % jobid)
     cache_contents = None
     try:
@@ -574,5 +589,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception, e:
+        log(traceback.format_exc())
         print "1ERROR: %s" % str(e).replace("\n", "\\n")
         sys.exit(0)

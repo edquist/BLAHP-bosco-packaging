@@ -20,9 +20,9 @@
 #
 
 
-[ -f ${GLITE_LOCATION:-/opt/glite}/etc/batch_gahp.config ] && . ${GLITE_LOCATION:-/opt/glite}/etc/batch_gahp.config
+. `dirname $0`/blah_load_config.sh
 
-sge_helper_path=${GLITE_LOCATION:-/opt/glite}/bin
+sge_helper_path=${blah_libexec_directory}
 
 usage_string="Usage: $0 [-w] [-n]"
 
@@ -52,7 +52,7 @@ shift `expr $OPTIND - 1`
 
 if [ "x$getcreamport" == "xyes" ]
 then
-    exec `dirname $0`/blah_job_registry_lkup -n
+    exec ${blah_sbin_directory}/blah_job_registry_lkup -n
 fi
 
 if [ -z "$sge_rootpath" ]; then sge_rootpath="/usr/local/sge/pro"; fi
@@ -67,7 +67,7 @@ tmpid=`echo "$@"|sed 's/.*\/.*\///g'`
 jobid=${tmpid}.${sge_cellname:-default}
 
 
-blahp_status=`exec ${sge_helper_path:-/opt/glite/bin}/sge_helper --status $getwn $jobid`
+blahp_status=`exec ${sge_helper_path}/sge_helper --status $getwn $jobid`
 retcode=$?
 
 # Now see if we need to run qstat 'manually'

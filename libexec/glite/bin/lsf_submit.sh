@@ -142,24 +142,16 @@ else
 fi
 # --- End of MPI directives
 
-if [ "x$bls_opt_project" != "x" ] ; then
-  echo "#BSUB -P $bls_opt_project" >> $bls_tmp_file
-fi
-
-if [ "x$bls_opt_runtime" != "x" ] ; then
-  echo "#BSUB -W $((bls_opt_runtime / 60))" >> $bls_tmp_file
-fi
-
 #local batch system-specific file output must be added to the submit file
-bls_local_submit_attributes_file=${blah_bin_directory}/lsf_local_submit_attributes.sh
+bls_local_submit_attributes_file=${blah_libexec_directory}/lsf_local_submit_attributes.sh
 
 bls_set_up_local_and_extra_args
 
 # Write LSF directives according to command line options
 
 # File transfer directives. Input and output sandbox
-bls_fl_subst_and_dump inputsand "#BSUB -f \"@@F_LOCAL > @@F_REMOTE\"" $bls_tmp_file
-bls_fl_subst_and_dump outputsand "#BSUB -f \"@@F_LOCAL < @@F_REMOTE\"" $bls_tmp_file
+bls_fl_subst_and_dump inputsand "#BSUB -f \"@@F_LOCAL > @@F_REMOTE\"" >> $bls_tmp_file
+bls_fl_subst_and_dump outputsand "#BSUB -f \"@@F_LOCAL < @@F_REMOTE\"" >> $bls_tmp_file
 
 # Accommodate for CERN-specific job subdirectory creation.
 echo "" >> $bls_tmp_file
@@ -169,6 +161,7 @@ echo "    cd \$CERN_STARTER_ORIGINAL_CWD" >> $bls_tmp_file
 echo "fi" >> $bls_tmp_file
 
 bls_add_job_wrapper
+bls_save_submit
 
 # Let the wrap script be at least 1 second older than logfile
 # for subsequent "find -newer" command to work
@@ -272,7 +265,7 @@ blahp_jobID="lsf/${datenow}/$jobID"
 if [ "x$job_registry" != "x" ]; then
   now=`date +%s`
   let now=$now-1
-  `dirname $0`/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
+  ${blah_sbin_directory}/blah_job_registry_add "$blahp_jobID" "$jobID" 1 $now "$bls_opt_creamjobid" "$bls_proxy_local_file" "$bls_opt_proxyrenew_numeric" "$bls_opt_proxy_subject"
 fi
 
 echo ""
